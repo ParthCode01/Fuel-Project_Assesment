@@ -12,6 +12,8 @@ from routing.services.fuel_data import (
 GRID_CELL_DEGREES = 0.25
 MILES_PER_LATITUDE_DEGREE = 69.0
 SAMPLE_SPACING_MILES = 5.0
+MAX_VEHICLE_RANGE_MILES = 500.0
+VEHICLE_MPG = 10.0
 
 
 @dataclass(frozen=True)
@@ -129,6 +131,39 @@ def _cell(latitude, longitude):
     )
 
 
+def _distance_from_start_miles(route_points):
+    cumulative = [0.0]
+    total = 0.0
+    for start, end in zip(route_points, route_points[1:]):
+        total += _haversine_miles(start, end)
+        cumulative.append(total)
+    return cumulative
+
+
+def _reachable_station_positions(route_points, nearby_stations):
+    route_distance_by_point = _distance_from_start_miles(route_points)
+    total_route_distance = route_distance_by_point[-1]
+    reachable = []
+
+    for nearby in nearby_stations:
+        distance_along_route = nearby.distance_along_route_miles
+        if distance_along_route < 0:
+            continue
+        if distance_along_route > total_route_distance:
+            continue
+        reachable.append(
+            {
+                "station": nearby.station,
+                "latitude": nearby.latitude,
+                "longitude": nearby.longitude,
+                "distance_to_route_miles": nearby.distance_to_route_miles,
+                "distance_along_route_miles": distance_along_route,
+            }
+        )
+
+    return tuple(sorted(reachable, key=lambda item: item["distance_along_route_miles"]))
+
+
 def find_stations_near_route(route_geometry, max_distance_miles=25):
     if (
         not isinstance(max_distance_miles, (int, float))
@@ -195,3 +230,29 @@ def find_stations_near_route(route_geometry, max_distance_miles=25):
             key=lambda nearby: nearby.distance_along_route_miles,
         )
     )
+
+
+def get_reachable_stations(route_geometry, stations=None):
+    if stations is None:
+        stations = find_stations_near_route(route_geometry, max_distance_miles=25)
+
+    route_points = _validate_route_geometry(route_geometry)
+    route_miles = _distance_from_start_miles(route_points)[-1]
+    reachable = []
+
+    for nearby in stations:
+        remaining_after_station = max(0.0, route_miles - nearby.distance_along_route_miles)
+        if remaining_after_station < 0:
+            continue
+        reachable.append(
+            {
+                "station": nearby.station,
+                "latitude": nearby.latitude,
+                "longitude": nearby.longitude,
+                "distance_to_route_miles": nearby.distance_to_route_miles,
+                "distance_along_route_miles": nearby.distance_along_route_miles,
+                "distance_remaining_after_station_miles": remaining_after_station,
+            }
+        )
+
+    return tuple(sorted(reachable, key=lambda item: item["distance_along_route_miles"]))

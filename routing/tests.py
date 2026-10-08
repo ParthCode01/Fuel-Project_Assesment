@@ -278,6 +278,28 @@ class StationProximityTests(TestCase):
                 max_distance_miles=0,
             )
 
+    def test_identifies_reachable_stations_by_route_position(self):
+        route = {
+            "type": "LineString",
+            "coordinates": [[-113.0, 33.5], [-111.0, 33.5]],
+        }
+        station = FuelStation("route-stop", "Route Stop", "I-10", "Phoenix", "AZ", "1", 3.5)
+        nearby = (
+            station_proximity.NearbyFuelStation(
+                station,
+                33.5,
+                -112.0,
+                0,
+                50.0,
+            ),
+        )
+
+        reachable = station_proximity.get_reachable_stations(route, nearby)
+
+        self.assertEqual(len(reachable), 1)
+        self.assertEqual(reachable[0]["station"], station)
+        self.assertGreater(reachable[0]["distance_remaining_after_station_miles"], 0)
+
 
 class GeocodingServiceTests(TestCase):
     @patch.dict(os.environ, {}, clear=True)
