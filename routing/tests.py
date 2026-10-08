@@ -300,6 +300,39 @@ class StationProximityTests(TestCase):
         self.assertEqual(reachable[0]["station"], station)
         self.assertGreater(reachable[0]["distance_remaining_after_station_miles"], 0)
 
+    def test_selects_safe_cheapest_stops_within_range(self):
+        route = {
+            "type": "LineString",
+            "coordinates": [[-113.0, 33.5], [-112.0, 33.5], [-111.0, 33.5]],
+        }
+        cheaper = FuelStation("cheap", "Cheap Stop", "I-10", "Phoenix", "AZ", "1", 3.0)
+        pricier = FuelStation("pricy", "Pricey Stop", "I-10", "Mesa", "AZ", "2", 4.5)
+        far = FuelStation("far", "Far Stop", "I-10", "Tucson", "AZ", "3", 2.8)
+        nearby = (
+            station_proximity.NearbyFuelStation(cheaper, 33.5, -112.5, 0, 50.0),
+            station_proximity.NearbyFuelStation(pricier, 33.5, -111.5, 0, 120.0),
+            station_proximity.NearbyFuelStation(far, 33.5, -112.2, 0, 200.0),
+        )
+
+        selected = station_proximity.select_fuel_stops(route, nearby)
+
+        self.assertEqual(selected[0]["station"], cheaper)
+        self.assertGreater(selected[0]["distance_from_current_miles"], 0)
+        self.assertGreater(selected[0]["fuel_cost"], 0)
+
+    def test_rejects_route_with_no_safe_fuel_stop(self):
+        route = {
+            "type": "LineString",
+            "coordinates": [[-113.0, 33.5], [-111.0, 33.5]],
+        }
+        distant_station = FuelStation("distant", "Distant", "I-10", "Yuma", "AZ", "1", 3.1)
+        nearby = (
+            station_proximity.NearbyFuelStation(distant_station, 33.5, -112.0, 0, 700.0),
+        )
+
+        with self.assertRaisesRegex(ValueError, "No reachable fuel station"):
+            station_proximity.select_fuel_stops(route, nearby)
+
 
 class GeocodingServiceTests(TestCase):
     @patch.dict(os.environ, {}, clear=True)

@@ -256,3 +256,115 @@ def get_reachable_stations(route_geometry, stations=None):
         )
 
     return tuple(sorted(reachable, key=lambda item: item["distance_along_route_miles"]))
+
+
+def _route_length_miles(route_geometry):
+    route_points = _validate_route_geometry(route_geometry)
+    return _distance_from_start_miles(route_points)[-1]
+
+
+def select_fuel_stops(
+    route_geometry,
+    stations=None,
+    max_range_miles=MAX_VEHICLE_RANGE_MILES,
+    vehicle_mpg=VEHICLE_MPG,
+):
+    if (
+        not isinstance(max_range_miles, (int, float))
+        or not math.isfinite(max_range_miles)
+        or max_range_miles <= 0
+    ):
+        raise ValueError("max_range_miles must be a positive number.")
+    if (
+        not isinstance(vehicle_mpg, (int, float))
+        or not math.isfinite(vehicle_mpg)
+        or vehicle_mpg <= 0
+    ):
+        raise ValueError("vehicle_mpg must be a positive number.")
+
+    if stations is None:
+        stations = find_stations_near_route(route_geometry, max_distance_miles=25)
+
+    ordered_stations = tuple(sorted(stations, key=lambda item: item.distance_along_route_miles))
+    if not ordered_stations:
+        raise ValueError("No nearby fuel stations are available along the route.")
+
+    total_route_distance = _route_length_miles(route_geometry)
+    current_position = 0.0
+    selected = []
+
+    while current_position < total_route_distance:
+        candidates = [
+            station
+            for station in ordered_stations
+            if station.distance_along_route_miles > current_position
+            and station.distance_along_route_miles <= total_route_distance
+            and station.distance_along_route_miles - current_position <= max_range_miles
+        ]
+        if not candidates:
+            raise ValueError(
+                "No reachable fuel station can keep the vehicle from becoming stranded."
+            )
+
+        best_station = None
+        best_key = None
+        for station in candidates:
+            distance_to_station = station.distance_along_route_miles - current_position
+            finish_remaining = total_route_distance - station.distance_along_route_miles
+            future_station = next(
+                (
+                    next_station
+                    for next_station in ordered_stations
+                    if next_station.distance_along_route_miles > station.distance_along_route_miles
+                ),
+                None,
+            )
+            can_reach_next = (
+                finish_remaining <= max_range_miles
+                or (
+                    future_station is not None
+                    and future_station.distance_along_route_miles - station.distance_along_route_miles
+                    <= max_range_miles
+                )
+            )
+            if not can_reach_next:
+                continue
+
+            gallons_needed = distance_to_station / vehicle_mpg
+            fuel_cost = gallons_needed * station.station.price
+            candidate_key = (
+                station.station.price,
+                -station.distance_along_route_miles,
+                fuel_cost,
+            )
+            if best_key is None or candidate_key < best_key:
+                best_station = station
+                best_key = candidate_key
+
+        if best_station is None:
+            raise ValueError(
+                "No safe fuel station satisfies the vehicle range and route constraints."
+            )
+
+        total_gallons = (best_station.distance_along_route_miles - current_position) / vehicle_mpg
+        selected.append(
+            {
+                "station": best_station.station,
+                "distance_along_route_miles": best_station.distance_along_route_miles,
+                "distance_from_current_miles": best_station.distance_along_route_miles - current_position,
+                "gallons_needed": total_gallons,
+                "fuel_cost": total_gallons * best_station.station.price,
+                "price_per_gallon": best_station.station.price,
+            }
+        )
+        current_position = best_station.distance_along_route_miles
+        if total_route_distance - current_position <= max_range_miles:
+            break
+
+        if current_position >= total_route_distance:
+            break
+
+    if not selected:
+        raise ValueError("The route has no valid fuel-stop plan.")
+
+    return tuple(selected)
