@@ -8,18 +8,15 @@ import requests
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
 
-from routing.services.fuel_data import get_fuel_stations
+from routing.services.fuel_data import (
+    STATION_COORDINATES_PATH,
+    get_fuel_stations,
+    station_location_key,
+)
 from routing.services.geocoding import geocode
 
-COORDINATE_CACHE_PATH = (
-    Path(settings.BASE_DIR) / "data" / "fuel-station-coordinates.csv"
-)
+COORDINATE_CACHE_PATH = STATION_COORDINATES_PATH
 CACHE_COLUMNS = ("location_key", "latitude", "longitude")
-
-
-def _location_key(station):
-    fields = (station.address, station.city, station.state)
-    return "|".join(" ".join(value.casefold().split()) for value in fields)
 
 
 def _read_coordinate_cache():
@@ -105,7 +102,7 @@ class Command(BaseCommand):
 
         stations_by_location = {}
         for station in get_fuel_stations():
-            key = _location_key(station)
+            key = station_location_key(station)
             stations_by_location.setdefault(key, station)
 
         coordinates = _read_coordinate_cache()

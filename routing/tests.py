@@ -1,5 +1,6 @@
 import csv
 import json
+import math
 import os
 import tempfile
 from io import StringIO
@@ -11,10 +12,16 @@ from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.test import TestCase
 
+from routing.services import station_proximity
 from routing.services import fuel_data
-from routing.services.fuel_data import FuelStation, get_fuel_stations
+from routing.services.fuel_data import (
+    FuelStation,
+    get_fuel_stations,
+    get_station_coordinates,
+)
 from routing.services.geocoding import geocode
 from routing.services.routing import get_route
+from routing.services.station_proximity import find_stations_near_route
 from routing.management.commands import geocode_fuel_stations
 
 
@@ -33,6 +40,13 @@ class FuelDataTests(TestCase):
         self.addCleanup(self.path_patcher.stop)
         get_fuel_stations.cache_clear()
         self.addCleanup(get_fuel_stations.cache_clear)
+        self.coordinate_path_patcher = patch.object(
+            fuel_data, "STATION_COORDINATES_PATH", self.csv_path
+        )
+        self.coordinate_path_patcher.start()
+        self.addCleanup(self.coordinate_path_patcher.stop)
+        get_station_coordinates.cache_clear()
+        self.addCleanup(get_station_coordinates.cache_clear)
 
     def test_loads_and_normalizes_fuel_station_rows(self):
         self.assertEqual(
@@ -72,6 +86,18 @@ class FuelDataTests(TestCase):
 
         with self.assertRaisesRegex(ValueError, "row 2"):
             get_fuel_stations()
+
+    def test_loads_coordinate_cache(self):
+        self.csv_path.write_text(
+            "location_key,latitude,longitude\n"
+            "i-10|phoenix|az,33.4484,-112.074\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(
+            get_station_coordinates(),
+            {"i-10|phoenix|az": (33.4484, -112.074)},
+        )
 
 
 class StationGeocodingCommandTests(TestCase):
@@ -140,6 +166,117 @@ class StationGeocodingCommandTests(TestCase):
         with self.cache_path.open(newline="", encoding="utf-8") as cache_file:
             rows = list(csv.DictReader(cache_file))
         self.assertEqual(rows[0]["latitude"], "33.4484")
+
+
+class StationProximityTests(TestCase):
+    def setUp(self):
+        self.station = FuelStation(
+            "1", "Test Station", "I-10", "Phoenix", "AZ", "1", 3.5
+        )
+        self.stations_patcher = patch.object(
+            station_proximity, "get_fuel_stations", return_value=(self.station,)
+        )
+        self.coordinates_patcher = patch.object(
+            station_proximity,
+            "get_station_coordinates",
+            return_value={"i-10|phoenix|az": (33.5, -112.0)},
+        )
+        self.stations_patcher.start()
+        self.coordinates_patcher.start()
+        self.addCleanup(self.stations_patcher.stop)
+        self.addCleanup(self.coordinates_patcher.stop)
+
+    def test_finds_station_close_to_route(self):
+        route = {
+            "type": "LineString",
+            "coordinates": [[-113.0, 33.5], [-111.0, 33.5]],
+        }
+
+        nearby = find_stations_near_route(route, max_distance_miles=25)
+
+        self.assertEqual(len(nearby), 1)
+        self.assertIs(nearby[0].station, self.station)
+        self.assertAlmostEqual(nearby[0].distance_to_route_miles, 0, places=3)
+        self.assertAlmostEqual(
+            nearby[0].distance_along_route_miles,
+            69.0 * math.cos(math.radians(33.5)),
+            delta=0.5,
+        )
+
+    def test_orders_stations_by_distance_along_route(self):
+        first_station = FuelStation(
+            "first", "First", "US-1", "City A", "AZ", "1", 3.6
+        )
+        second_station = FuelStation(
+            "second", "Second", "US-2", "City B", "AZ", "2", 3.5
+        )
+        self.stations_patcher.stop()
+        self.stations_patcher = patch.object(
+            station_proximity,
+            "get_fuel_stations",
+            return_value=(second_station, first_station),
+        )
+        self.stations_patcher.start()
+        self.addCleanup(self.stations_patcher.stop)
+        self.coordinates_patcher.stop()
+        self.coordinates_patcher = patch.object(
+            station_proximity,
+            "get_station_coordinates",
+            return_value={
+                "us-1|city a|az": (33.5, -112.5),
+                "us-2|city b|az": (33.5, -111.8),
+            },
+        )
+        self.coordinates_patcher.start()
+        self.addCleanup(self.coordinates_patcher.stop)
+        route = {
+            "type": "LineString",
+            "coordinates": [
+                [-113.0, 33.5],
+                [-112.0, 33.5],
+                [-111.0, 33.5],
+            ],
+        }
+
+        nearby = find_stations_near_route(route, max_distance_miles=25)
+
+        self.assertEqual(
+            [item.station.station_id for item in nearby], ["first", "second"]
+        )
+        self.assertLess(
+            nearby[0].distance_along_route_miles,
+            nearby[1].distance_along_route_miles,
+        )
+
+    def test_excludes_station_outside_proximity_limit(self):
+        route = {
+            "type": "LineString",
+            "coordinates": [[-113.0, 33.5], [-111.0, 33.5]],
+        }
+        self.coordinates_patcher.stop()
+        self.coordinates_patcher = patch.object(
+            station_proximity,
+            "get_station_coordinates",
+            return_value={"i-10|phoenix|az": (35.0, -112.0)},
+        )
+        self.coordinates_patcher.start()
+        self.addCleanup(self.coordinates_patcher.stop)
+
+        self.assertEqual(find_stations_near_route(route, max_distance_miles=25), ())
+
+    def test_rejects_invalid_route_geometry(self):
+        with self.assertRaisesRegex(ValueError, "LineString"):
+            find_stations_near_route({"type": "Point", "coordinates": [-112, 33]})
+
+    def test_requires_positive_proximity_limit(self):
+        with self.assertRaisesRegex(ValueError, "positive number"):
+            find_stations_near_route(
+                {
+                    "type": "LineString",
+                    "coordinates": [[-113.0, 33.5], [-111.0, 33.5]],
+                },
+                max_distance_miles=0,
+            )
 
 
 class GeocodingServiceTests(TestCase):
