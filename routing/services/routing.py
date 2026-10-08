@@ -11,6 +11,7 @@ load_dotenv(PROJECT_ROOT / "config" / ".env")
 DIRECTIONS_URL = (
     "https://api.openrouteservice.org/v2/directions/driving-car/geojson"
 )
+METERS_PER_MILE = 1609.344
 
 
 def get_route(start_coordinates, finish_coordinates):
@@ -73,5 +74,6 @@ def get_route(start_coordinates, finish_coordinates):
 
     return {
         "distance_meters": distance_meters,
+        "distance_miles": distance_meters / METERS_PER_MILE,
         "geometry": geometry,
     }

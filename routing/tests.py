@@ -67,7 +67,12 @@ class RoutingServiceTests(TestCase):
         result = get_route((40.7, -74.0), (41.9, -87.6))
 
         self.assertEqual(
-            result, {"distance_meters": 1270000, "geometry": geometry}
+            result,
+            {
+                "distance_meters": 1270000,
+                "distance_miles": 1270000 / 1609.344,
+                "geometry": geometry,
+            },
         )
         mock_post.assert_called_once()
         self.assertEqual(
@@ -114,6 +119,7 @@ class RouteViewGeocodingTests(TestCase):
     ):
         mock_get_route.return_value = {
             "distance_meters": 1270000,
+            "distance_miles": 1270000 / 1609.344,
             "geometry": {
                 "type": "LineString",
                 "coordinates": [[-74.0, 40.7], [-87.6, 41.9]],
@@ -144,6 +150,13 @@ class RouteViewGeocodingTests(TestCase):
         )
         self.assertEqual(
             response.json()["route"]["distance_meters"], 1270000
+        )
+        self.assertAlmostEqual(
+            response.json()["route"]["distance_miles"], 789.14, places=2
+        )
+        self.assertEqual(
+            response.json()["route"]["geometry"]["coordinates"],
+            [[-74.0, 40.7], [-87.6, 41.9]],
         )
         self.assertEqual(mock_get_route.call_count, 1)
         self.assertEqual(mock_geocode.call_count, 2)
