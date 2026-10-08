@@ -345,6 +345,22 @@ class StationProximityTests(TestCase):
         with self.assertRaisesRegex(ValueError, "distance_miles"):
             station_proximity.calculate_fuel_needed(-5)
 
+    def test_calculates_total_fuel_cost(self):
+        selected_stops = (
+            {"gallons_needed": 10, "price_per_gallon": 3.5},
+            {"gallons_needed": 5, "price_per_gallon": 4.0},
+        )
+
+        self.assertAlmostEqual(
+            station_proximity.calculate_total_fuel_cost(selected_stops),
+            55.0,
+        )
+
+        with self.assertRaisesRegex(ValueError, "gallons_needed"):
+            station_proximity.calculate_total_fuel_cost(
+                ({"gallons_needed": -1, "price_per_gallon": 3.0},)
+            )
+
 
 class GeocodingServiceTests(TestCase):
     @patch.dict(os.environ, {}, clear=True)

@@ -279,6 +279,35 @@ def calculate_fuel_needed(distance_miles, vehicle_mpg=VEHICLE_MPG):
     return distance_miles / vehicle_mpg
 
 
+def calculate_total_fuel_cost(selected_stops):
+    if not isinstance(selected_stops, (list, tuple)):
+        raise ValueError("selected_stops must be a list or tuple of stop records.")
+
+    total_cost = 0.0
+    for stop in selected_stops:
+        if not isinstance(stop, dict):
+            raise ValueError("Each fuel stop must be a dictionary with gallons and price.")
+
+        gallons = stop.get("gallons_needed")
+        price = stop.get("price_per_gallon")
+        if (
+            not isinstance(gallons, (int, float))
+            or not math.isfinite(gallons)
+            or gallons < 0
+        ):
+            raise ValueError("Each fuel stop must include a valid gallons_needed value.")
+        if (
+            not isinstance(price, (int, float))
+            or not math.isfinite(price)
+            or price < 0
+        ):
+            raise ValueError("Each fuel stop must include a valid price_per_gallon value.")
+
+        total_cost += gallons * price
+
+    return total_cost
+
+
 def select_fuel_stops(
     route_geometry,
     stations=None,
