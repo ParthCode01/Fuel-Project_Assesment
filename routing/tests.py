@@ -1,16 +1,21 @@
+import csv
 import json
 import os
 import tempfile
+from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
 import requests
+from django.core.management import call_command
+from django.core.management.base import CommandError
 from django.test import TestCase
 
 from routing.services import fuel_data
 from routing.services.fuel_data import FuelStation, get_fuel_stations
 from routing.services.geocoding import geocode
 from routing.services.routing import get_route
+from routing.management.commands import geocode_fuel_stations
 
 
 class FuelDataTests(TestCase):
@@ -67,6 +72,74 @@ class FuelDataTests(TestCase):
 
         with self.assertRaisesRegex(ValueError, "row 2"):
             get_fuel_stations()
+
+
+class StationGeocodingCommandTests(TestCase):
+    def setUp(self):
+        self.temp_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_directory.cleanup)
+        self.cache_path = Path(self.temp_directory.name) / "station-coordinates.csv"
+        self.cache_patcher = patch.object(
+            geocode_fuel_stations, "COORDINATE_CACHE_PATH", self.cache_path
+        )
+        self.cache_patcher.start()
+        self.addCleanup(self.cache_patcher.stop)
+        self.stations_patcher = patch(
+            "routing.management.commands.geocode_fuel_stations.get_fuel_stations",
+            return_value=(
+                FuelStation("1", "Station A", "I-10", "Phoenix", "AZ", "1", 3.5),
+                FuelStation("2", "Station B", " I-10 ", " phoenix ", "az", "1", 3.4),
+                FuelStation("3", "Station C", "US-1", "Miami", "FL", "2", 3.6),
+            ),
+        )
+        self.stations_patcher.start()
+        self.addCleanup(self.stations_patcher.stop)
+
+    @patch("routing.management.commands.geocode_fuel_stations.geocode")
+    def test_dry_run_reports_work_without_calling_geocoder(self, mock_geocode):
+        output = StringIO()
+
+        call_command("geocode_fuel_stations", dry_run=True, stdout=output)
+
+        self.assertIn("2 unique station locations", output.getvalue())
+        self.assertIn("2 would be geocoded", output.getvalue())
+        mock_geocode.assert_not_called()
+        self.assertFalse(self.cache_path.exists())
+
+    @patch(
+        "routing.management.commands.geocode_fuel_stations.geocode",
+        side_effect=[(33.4484, -112.074), (25.7617, -80.1918)],
+    )
+    def test_deduplicates_and_resumes_from_coordinate_cache(self, mock_geocode):
+        call_command("geocode_fuel_stations", limit=1, delay=0, stdout=StringIO())
+
+        mock_geocode.assert_called_once_with("I-10, Phoenix, AZ, USA")
+        call_command("geocode_fuel_stations", limit=1, delay=0, stdout=StringIO())
+
+        self.assertEqual(mock_geocode.call_count, 2)
+        with self.cache_path.open(newline="", encoding="utf-8") as cache_file:
+            rows = list(csv.DictReader(cache_file))
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["latitude"], "33.4484")
+        self.assertEqual(rows[1]["longitude"], "-80.1918")
+
+    @patch(
+        "routing.management.commands.geocode_fuel_stations.geocode",
+        side_effect=requests.Timeout("timed out"),
+    )
+    def test_external_failure_stops_and_keeps_cache_file(self, _mock_geocode):
+        self.cache_path.write_text(
+            "location_key,latitude,longitude\n"
+            "i-10|phoenix|az,33.4484,-112.074\n",
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(CommandError, "Geocoding stopped"):
+            call_command("geocode_fuel_stations", delay=0)
+
+        with self.cache_path.open(newline="", encoding="utf-8") as cache_file:
+            rows = list(csv.DictReader(cache_file))
+        self.assertEqual(rows[0]["latitude"], "33.4484")
 
 
 class GeocodingServiceTests(TestCase):
