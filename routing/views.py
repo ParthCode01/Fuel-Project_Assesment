@@ -32,25 +32,30 @@ def route_view(request):
     if request.method != "POST":
         return JsonResponse(
             {"error": "Only POST requests are allowed"},
-            status=405
+            status=405,
         )
 
     try:
         data = json.loads(request.body)
     except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON"}, status=400)
+
+    if not isinstance(data, dict):
         return JsonResponse(
-            {"error": "Invalid JSON"},
-            status=400
+            {"error": "Request body must be a JSON object with start and finish."},
+            status=400,
         )
 
     start = data.get("start")
     finish = data.get("finish")
 
-    if not start or not finish:
-        return JsonResponse(
-            {"error": "start and finish are required"},
-            status=400
-        )
+    if not isinstance(start, str) or not start.strip():
+        return JsonResponse({"error": "start is required"}, status=400)
+    if not isinstance(finish, str) or not finish.strip():
+        return JsonResponse({"error": "finish is required"}, status=400)
+
+    start = start.strip()
+    finish = finish.strip()
 
     try:
         start_coordinates = geocode(start)
@@ -88,8 +93,8 @@ def route_view(request):
     if nearby_stations:
         try:
             selected_stops = select_fuel_stops(route["geometry"], nearby_stations)
-        except ValueError:
-            selected_stops = ()
+        except ValueError as exc:
+            return JsonResponse({"error": str(exc)}, status=409)
 
     if selected_stops:
         total_gallons = sum(stop["gallons_needed"] for stop in selected_stops)

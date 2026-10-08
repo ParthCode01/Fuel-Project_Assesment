@@ -552,6 +552,47 @@ class RouteViewGeocodingTests(TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["error"], "Location not found")
 
+    @patch("routing.views.get_route")
+    @patch("routing.views.geocode", side_effect=[(40.7, -74.0), (41.9, -87.6)])
+    @patch("routing.views.find_stations_near_route", return_value=())
+    def test_post_rejects_non_object_json_body(
+        self, _mock_find_stations_near_route, _mock_geocode, _mock_get_route
+    ):
+        response = self.client.post(
+            "/api/route/",
+            data=json.dumps(["not", "an", "object"]),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("JSON object", response.json()["error"])
+
+    @patch("routing.views.select_fuel_stops", side_effect=ValueError("No reachable fuel station"))
+    @patch("routing.views.find_stations_near_route")
+    @patch("routing.views.get_route")
+    @patch("routing.views.geocode", side_effect=[(40.7, -74.0), (41.9, -87.6)])
+    def test_post_returns_conflict_when_route_has_no_reachable_fuel_stations(
+        self, _mock_geocode, _mock_get_route, _mock_find_stations_near_route, _mock_select_fuel_stops
+    ):
+        _mock_find_stations_near_route.return_value = (
+            station_proximity.NearbyFuelStation(
+                FuelStation("1", "Test Station", "Main St", "Chicago", "IL", "1", 3.25),
+                41.9,
+                -87.6,
+                0.0,
+                10.0,
+            ),
+        )
+
+        response = self.client.post(
+            "/api/route/",
+            data=json.dumps({"start": "New York, NY", "finish": "Chicago, IL"}),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["error"], "No reachable fuel station")
+
     @patch(
         "routing.views.geocode",
         side_effect=requests.ConnectionError("Connection failed"),
