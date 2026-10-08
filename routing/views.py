@@ -2,6 +2,7 @@ import json
 
 import requests
 from django.http import JsonResponse
+from django.views.decorators.csrf import csrf_exempt
 from routing.services.geocoding import geocode
 from routing.services.routing import get_route
 from routing.services.station_proximity import (
@@ -28,6 +29,7 @@ def _serialize_selected_stop(stop):
     }
 
 
+@csrf_exempt
 def route_view(request):
     if request.method != "POST":
         return JsonResponse(
