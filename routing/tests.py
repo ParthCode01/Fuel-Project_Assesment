@@ -1,12 +1,72 @@
 import json
 import os
+import tempfile
+from pathlib import Path
 from unittest.mock import patch
 
 import requests
 from django.test import TestCase
 
+from routing.services import fuel_data
+from routing.services.fuel_data import FuelStation, get_fuel_stations
 from routing.services.geocoding import geocode
 from routing.services.routing import get_route
+
+
+class FuelDataTests(TestCase):
+    def setUp(self):
+        self.temp_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_directory.cleanup)
+        self.csv_path = Path(self.temp_directory.name) / "fuel-prices.csv"
+        self.csv_path.write_text(
+            "OPIS Truckstop ID,Truckstop Name,Address,City,State,Rack ID,Retail Price\n"
+            " 12 , TEST STATION , I-10 EXIT 1 , Phoenix , AZ , 123 ,3.499\n",
+            encoding="utf-8",
+        )
+        self.path_patcher = patch.object(fuel_data, "FUEL_DATA_PATH", self.csv_path)
+        self.path_patcher.start()
+        self.addCleanup(self.path_patcher.stop)
+        get_fuel_stations.cache_clear()
+        self.addCleanup(get_fuel_stations.cache_clear)
+
+    def test_loads_and_normalizes_fuel_station_rows(self):
+        self.assertEqual(
+            get_fuel_stations(),
+            (
+                FuelStation(
+                    station_id="12",
+                    name="TEST STATION",
+                    address="I-10 EXIT 1",
+                    city="Phoenix",
+                    state="AZ",
+                    rack_id="123",
+                    price=3.499,
+                ),
+            ),
+        )
+
+    def test_caches_loaded_rows(self):
+        first_load = get_fuel_stations()
+        self.csv_path.write_text("", encoding="utf-8")
+
+        self.assertIs(get_fuel_stations(), first_load)
+        self.assertEqual(len(get_fuel_stations()), 1)
+
+    def test_raises_for_missing_required_columns(self):
+        self.csv_path.write_text("Truckstop Name,Retail Price\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "missing one or more required"):
+            get_fuel_stations()
+
+    def test_raises_for_invalid_station_price(self):
+        self.csv_path.write_text(
+            "OPIS Truckstop ID,Truckstop Name,Address,City,State,Rack ID,Retail Price\n"
+            "12,TEST STATION,I-10 EXIT 1,Phoenix,AZ,123,unknown\n",
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(ValueError, "row 2"):
+            get_fuel_stations()
 
 
 class GeocodingServiceTests(TestCase):
