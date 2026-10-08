@@ -3,6 +3,7 @@ import json
 import requests
 from django.http import JsonResponse
 from routing.services.geocoding import geocode
+from routing.services.routing import get_route
 
 
 def route_view(request):
@@ -42,8 +43,18 @@ def route_view(request):
             status=502
         )
 
+    try:
+        route = get_route(start_coordinates, finish_coordinates)
+    except RuntimeError as exc:
+        return JsonResponse({"error": str(exc)}, status=503)
+    except requests.RequestException:
+        return JsonResponse(
+            {"error": "The routing service is unavailable"},
+            status=502
+        )
+
     return JsonResponse({
-        "message": "Locations geocoded",
+        "message": "Route calculated",
         "start": {
             "address": start,
             "latitude": start_coordinates[0],
@@ -54,4 +65,5 @@ def route_view(request):
             "latitude": finish_coordinates[0],
             "longitude": finish_coordinates[1],
         },
+        "route": route,
     })
