@@ -263,6 +263,22 @@ def _route_length_miles(route_geometry):
     return _distance_from_start_miles(route_points)[-1]
 
 
+def calculate_fuel_needed(distance_miles, vehicle_mpg=VEHICLE_MPG):
+    if (
+        not isinstance(distance_miles, (int, float))
+        or not math.isfinite(distance_miles)
+        or distance_miles < 0
+    ):
+        raise ValueError("distance_miles must be a non-negative number.")
+    if (
+        not isinstance(vehicle_mpg, (int, float))
+        or not math.isfinite(vehicle_mpg)
+        or vehicle_mpg <= 0
+    ):
+        raise ValueError("vehicle_mpg must be a positive number.")
+    return distance_miles / vehicle_mpg
+
+
 def select_fuel_stops(
     route_geometry,
     stations=None,
@@ -330,7 +346,7 @@ def select_fuel_stops(
             if not can_reach_next:
                 continue
 
-            gallons_needed = distance_to_station / vehicle_mpg
+            gallons_needed = calculate_fuel_needed(distance_to_station, vehicle_mpg)
             fuel_cost = gallons_needed * station.station.price
             candidate_key = (
                 station.station.price,
@@ -346,7 +362,10 @@ def select_fuel_stops(
                 "No safe fuel station satisfies the vehicle range and route constraints."
             )
 
-        total_gallons = (best_station.distance_along_route_miles - current_position) / vehicle_mpg
+        total_gallons = calculate_fuel_needed(
+            best_station.distance_along_route_miles - current_position,
+            vehicle_mpg,
+        )
         selected.append(
             {
                 "station": best_station.station,

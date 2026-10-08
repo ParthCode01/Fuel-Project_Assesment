@@ -333,6 +333,18 @@ class StationProximityTests(TestCase):
         with self.assertRaisesRegex(ValueError, "No reachable fuel station"):
             station_proximity.select_fuel_stops(route, nearby)
 
+    def test_calculates_fuel_needed_for_distance(self):
+        self.assertAlmostEqual(
+            station_proximity.calculate_fuel_needed(100, 10),
+            10.0,
+        )
+        self.assertAlmostEqual(
+            station_proximity.calculate_fuel_needed(0, 10),
+            0.0,
+        )
+        with self.assertRaisesRegex(ValueError, "distance_miles"):
+            station_proximity.calculate_fuel_needed(-5)
+
 
 class GeocodingServiceTests(TestCase):
     @patch.dict(os.environ, {}, clear=True)
