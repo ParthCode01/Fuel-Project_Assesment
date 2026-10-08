@@ -465,10 +465,16 @@ class RoutingServiceTests(TestCase):
 
 
 class RouteViewGeocodingTests(TestCase):
+    @patch("routing.views.select_fuel_stops")
+    @patch("routing.views.find_stations_near_route")
     @patch("routing.views.get_route")
     @patch("routing.views.geocode", side_effect=[(40.7, -74.0), (41.9, -87.6)])
     def test_post_geocodes_locations_and_returns_route(
-        self, mock_geocode, mock_get_route
+        self,
+        mock_geocode,
+        mock_get_route,
+        mock_find_stations_near_route,
+        mock_select_fuel_stops,
     ):
         mock_get_route.return_value = {
             "distance_meters": 1270000,
@@ -478,6 +484,24 @@ class RouteViewGeocodingTests(TestCase):
                 "coordinates": [[-74.0, 40.7], [-87.6, 41.9]],
             },
         }
+        mock_find_stations_near_route.return_value = (
+            station_proximity.NearbyFuelStation(
+                FuelStation("1", "Test Station", "Main St", "Chicago", "IL", "1", 3.25),
+                41.9,
+                -87.6,
+                0.0,
+                10.0,
+            ),
+        )
+        mock_select_fuel_stops.return_value = (
+            {
+                "station": FuelStation("1", "Test Station", "Main St", "Chicago", "IL", "1", 3.25),
+                "distance_along_route_miles": 10.0,
+                "distance_from_current_miles": 10.0,
+                "gallons_needed": 1.0,
+                "fuel_cost": 3.25,
+            },
+        )
         response = self.client.post(
             "/api/route/",
             data=json.dumps({"start": "New York, NY", "finish": "Chicago, IL"}),
@@ -511,6 +535,9 @@ class RouteViewGeocodingTests(TestCase):
             response.json()["route"]["geometry"]["coordinates"],
             [[-74.0, 40.7], [-87.6, 41.9]],
         )
+        self.assertEqual(response.json()["total_gallons"], 1.0)
+        self.assertEqual(response.json()["total_fuel_cost"], 3.25)
+        self.assertEqual(response.json()["selected_stops"][0]["name"], "Test Station")
         self.assertEqual(mock_get_route.call_count, 1)
         self.assertEqual(mock_geocode.call_count, 2)
 
