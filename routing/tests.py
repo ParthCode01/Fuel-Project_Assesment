@@ -361,6 +361,22 @@ class StationProximityTests(TestCase):
                 ({"gallons_needed": -1, "price_per_gallon": 3.0},)
             )
 
+    def test_caches_route_processing_values(self):
+        route = {
+            "type": "LineString",
+            "coordinates": [[-113.0, 33.5], [-111.0, 33.5]],
+        }
+        route_points = station_proximity._validate_route_geometry(route)
+
+        self.assertIs(
+            station_proximity._sample_route(route_points),
+            station_proximity._sample_route(route_points),
+        )
+        self.assertIs(
+            station_proximity._distance_from_start_miles(route_points),
+            station_proximity._distance_from_start_miles(route_points),
+        )
+
 
 class GeocodingServiceTests(TestCase):
     @patch.dict(os.environ, {}, clear=True)

@@ -1,6 +1,7 @@
 import math
 from collections import defaultdict
 from dataclasses import dataclass
+from functools import lru_cache
 
 from routing.services.fuel_data import (
     FuelStation,
@@ -49,7 +50,7 @@ def _validate_route_geometry(route_geometry):
             raise ValueError("Route geometry contains an out-of-range coordinate.")
         points.append((longitude, latitude))
 
-    return points
+    return tuple(points)
 
 
 def _haversine_miles(first, second):
@@ -66,7 +67,9 @@ def _haversine_miles(first, second):
     return 3958.7613 * 2 * math.atan2(math.sqrt(value), math.sqrt(1 - value))
 
 
+@lru_cache(maxsize=128)
 def _sample_route(points):
+    points = tuple(points)
     samples = [points[0]]
     for start, end in zip(points, points[1:]):
         segment_length = _haversine_miles(start, end)
@@ -79,7 +82,7 @@ def _sample_route(points):
                     start[1] + (end[1] - start[1]) * fraction,
                 )
             )
-    return samples
+    return tuple(samples)
 
 
 def _project_onto_segment_miles(point, start, end):
@@ -131,13 +134,15 @@ def _cell(latitude, longitude):
     )
 
 
+@lru_cache(maxsize=128)
 def _distance_from_start_miles(route_points):
+    route_points = tuple(route_points)
     cumulative = [0.0]
     total = 0.0
     for start, end in zip(route_points, route_points[1:]):
         total += _haversine_miles(start, end)
         cumulative.append(total)
-    return cumulative
+    return tuple(cumulative)
 
 
 def _reachable_station_positions(route_points, nearby_stations):
