@@ -1,3 +1,4 @@
+import math
 import os
 from pathlib import Path
 
@@ -40,8 +41,15 @@ def geocode(address):
     except (KeyError, IndexError, TypeError, ValueError) as exc:
         raise RuntimeError("Unexpected response from geocoding service.") from exc
 
-    if not isinstance(latitude, (int, float)) or not isinstance(
-        longitude, (int, float)
+    if (
+        not isinstance(latitude, (int, float))
+        or isinstance(latitude, bool)
+        or not math.isfinite(latitude)
+        or not -90 <= latitude <= 90
+        or not isinstance(longitude, (int, float))
+        or isinstance(longitude, bool)
+        or not math.isfinite(longitude)
+        or not -180 <= longitude <= 180
     ):
         raise RuntimeError("Unexpected response from geocoding service.")
 

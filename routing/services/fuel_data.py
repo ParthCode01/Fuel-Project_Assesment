@@ -1,4 +1,5 @@
 import csv
+import math
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -23,6 +24,15 @@ class FuelStation:
 def station_location_key(station):
     fields = (station.address, station.city, station.state)
     return "|".join(" ".join(value.casefold().split()) for value in fields)
+
+
+def _valid_coordinate(value, minimum, maximum):
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and minimum <= value <= maximum
+    )
 
 
 @lru_cache(maxsize=1)
@@ -57,23 +67,26 @@ def get_fuel_stations():
                 raise ValueError(
                     f"Invalid fuel CSV data on row {row_number}."
                 ) from exc
+            if (
+                not station.station_id
+                or not station.name
+                or not station.address
+                or not station.city
+                or not station.state
+                or not math.isfinite(station.price)
+                or station.price <= 0
+            ):
+                raise ValueError(f"Invalid fuel CSV data on row {row_number}.")
             stations.append(station)
 
     return tuple(stations)
 
 
-@lru_cache(maxsize=1)
-def get_station_coordinates():
-    if not STATION_COORDINATES_PATH.exists():
-        raise FileNotFoundError(
-            f"Station coordinate cache not found: {STATION_COORDINATES_PATH}"
-        )
-
+@lru_cache(maxsize=4)
+def _load_station_coordinates(path, _modified_ns, _file_size):
     required_columns = {"location_key", "latitude", "longitude"}
     coordinates = {}
-    with STATION_COORDINATES_PATH.open(
-        newline="", encoding="utf-8"
-    ) as cache_file:
+    with path.open(newline="", encoding="utf-8") as cache_file:
         reader = csv.DictReader(cache_file)
         if not required_columns.issubset(reader.fieldnames or []):
             raise ValueError("Station coordinate cache has invalid columns.")
@@ -89,8 +102,8 @@ def get_station_coordinates():
                 ) from exc
             if (
                 not key
-                or not -90 <= latitude <= 90
-                or not -180 <= longitude <= 180
+                or not _valid_coordinate(latitude, -90, 90)
+                or not _valid_coordinate(longitude, -180, 180)
             ):
                 raise ValueError(
                     f"Station coordinate cache has invalid data on row {row_number}."
@@ -98,3 +111,31 @@ def get_station_coordinates():
             coordinates[key] = (latitude, longitude)
 
     return coordinates
+
+
+def get_station_coordinates():
+    try:
+        cache_stat = STATION_COORDINATES_PATH.stat()
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(
+            f"Station coordinate cache not found: {STATION_COORDINATES_PATH}"
+        ) from exc
+    return _load_station_coordinates(
+        STATION_COORDINATES_PATH,
+        cache_stat.st_mtime_ns,
+        cache_stat.st_size,
+    )
+
+
+def get_station_coordinate_coverage():
+    unique_location_keys = {
+        station_location_key(station) for station in get_fuel_stations()
+    }
+    cached_location_keys = set(get_station_coordinates())
+    cached_count = len(unique_location_keys & cached_location_keys)
+    total_count = len(unique_location_keys)
+    return {
+        "cached_locations": cached_count,
+        "total_locations": total_count,
+        "complete": cached_count == total_count,
+    }

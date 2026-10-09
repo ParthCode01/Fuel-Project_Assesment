@@ -45,8 +45,8 @@ class FuelDataTests(TestCase):
         )
         self.coordinate_path_patcher.start()
         self.addCleanup(self.coordinate_path_patcher.stop)
-        get_station_coordinates.cache_clear()
-        self.addCleanup(get_station_coordinates.cache_clear)
+        fuel_data._load_station_coordinates.cache_clear()
+        self.addCleanup(fuel_data._load_station_coordinates.cache_clear)
 
     def test_loads_and_normalizes_fuel_station_rows(self):
         self.assertEqual(
@@ -87,6 +87,16 @@ class FuelDataTests(TestCase):
         with self.assertRaisesRegex(ValueError, "row 2"):
             get_fuel_stations()
 
+    def test_rejects_non_finite_station_price(self):
+        self.csv_path.write_text(
+            "OPIS Truckstop ID,Truckstop Name,Address,City,State,Rack ID,Retail Price\n"
+            "12,TEST STATION,I-10 EXIT 1,Phoenix,AZ,123,nan\n",
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(ValueError, "row 2"):
+            get_fuel_stations()
+
     def test_loads_coordinate_cache(self):
         self.csv_path.write_text(
             "location_key,latitude,longitude\n"
@@ -98,6 +108,36 @@ class FuelDataTests(TestCase):
             get_station_coordinates(),
             {"i-10|phoenix|az": (33.4484, -112.074)},
         )
+
+    def test_reloads_coordinate_cache_after_file_changes(self):
+        self.csv_path.write_text(
+            "location_key,latitude,longitude\n"
+            "i-10|phoenix|az,33.4484,-112.074\n",
+            encoding="utf-8",
+        )
+        first = get_station_coordinates()
+
+        self.csv_path.write_text(
+            "location_key,latitude,longitude\n"
+            "i-10|phoenix|az,34.0,-113.0\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(first["i-10|phoenix|az"], (33.4484, -112.074))
+        self.assertEqual(
+            get_station_coordinates()["i-10|phoenix|az"],
+            (34.0, -113.0),
+        )
+
+    def test_rejects_non_finite_cached_coordinates(self):
+        self.csv_path.write_text(
+            "location_key,latitude,longitude\n"
+            "i-10|phoenix|az,nan,-112.074\n",
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(ValueError, "invalid data on row 2"):
+            get_station_coordinates()
 
 
 class StationGeocodingCommandTests(TestCase):
@@ -127,10 +167,62 @@ class StationGeocodingCommandTests(TestCase):
 
         call_command("geocode_fuel_stations", dry_run=True, stdout=output)
 
-        self.assertIn("2 unique station locations", output.getvalue())
-        self.assertIn("2 would be geocoded", output.getvalue())
+        self.assertIn("2 unique locations", output.getvalue())
+        self.assertIn("2 would be processed", output.getvalue())
         mock_geocode.assert_not_called()
         self.assertFalse(self.cache_path.exists())
+
+    @patch(
+        "routing.management.commands.geocode_fuel_stations.geocode",
+        side_effect=[(35.0, -94.0), (40.0, -80.0)],
+    )
+    def test_geocodes_only_requested_station_ids(self, mock_geocode):
+        call_command(
+            "geocode_fuel_stations",
+            station_ids="1,3",
+            delay=0,
+            stdout=StringIO(),
+        )
+
+        self.assertEqual(mock_geocode.call_count, 2)
+        self.assertEqual(
+            [call.args[0] for call in mock_geocode.call_args_list],
+            ["I-10, Phoenix, AZ, USA", "US-1, Miami, FL, USA"],
+        )
+
+    def test_rejects_unknown_station_ids(self):
+        with self.assertRaisesRegex(CommandError, "Unknown station IDs"):
+            call_command(
+                "geocode_fuel_stations",
+                station_ids="missing",
+                delay=0,
+                stdout=StringIO(),
+            )
+
+    @patch(
+        "routing.management.commands.geocode_fuel_stations.geocode",
+        return_value=(25.7617, -80.1918),
+    )
+    def test_city_centroid_mode_uses_city_and_state_query(self, mock_geocode):
+        call_command(
+            "geocode_fuel_stations",
+            station_ids="3",
+            city_centroid=True,
+            refresh=True,
+            delay=0,
+            stdout=StringIO(),
+        )
+
+        mock_geocode.assert_called_once_with("Miami, FL, USA")
+
+    def test_city_centroid_requires_selected_station_ids(self):
+        with self.assertRaisesRegex(CommandError, "--city-centroid requires"):
+            call_command(
+                "geocode_fuel_stations",
+                city_centroid=True,
+                dry_run=True,
+                stdout=StringIO(),
+            )
 
     @patch(
         "routing.management.commands.geocode_fuel_stations.geocode",
@@ -278,60 +370,51 @@ class StationProximityTests(TestCase):
                 max_distance_miles=0,
             )
 
-    def test_identifies_reachable_stations_by_route_position(self):
-        route = {
-            "type": "LineString",
-            "coordinates": [[-113.0, 33.5], [-111.0, 33.5]],
-        }
-        station = FuelStation("route-stop", "Route Stop", "I-10", "Phoenix", "AZ", "1", 3.5)
-        nearby = (
-            station_proximity.NearbyFuelStation(
-                station,
-                33.5,
-                -112.0,
-                0,
-                50.0,
-            ),
-        )
-
-        reachable = station_proximity.get_reachable_stations(route, nearby)
-
-        self.assertEqual(len(reachable), 1)
-        self.assertEqual(reachable[0]["station"], station)
-        self.assertGreater(reachable[0]["distance_remaining_after_station_miles"], 0)
-
     def test_selects_safe_cheapest_stops_within_range(self):
         route = {
             "type": "LineString",
-            "coordinates": [[-113.0, 33.5], [-112.0, 33.5], [-111.0, 33.5]],
+            "coordinates": [[-120.0, 33.5], [-106.2, 33.5]],
         }
-        cheaper = FuelStation("cheap", "Cheap Stop", "I-10", "Phoenix", "AZ", "1", 3.0)
-        pricier = FuelStation("pricy", "Pricey Stop", "I-10", "Mesa", "AZ", "2", 4.5)
-        far = FuelStation("far", "Far Stop", "I-10", "Tucson", "AZ", "3", 2.8)
+        expensive = FuelStation("expensive", "Expensive", "I-80", "City A", "OH", "1", 5.0)
+        cheaper = FuelStation("cheap", "Cheap Stop", "I-80", "City B", "OH", "2", 2.8)
+        far = FuelStation("far", "Far Stop", "I-80", "City C", "IL", "3", 2.0)
         nearby = (
-            station_proximity.NearbyFuelStation(cheaper, 33.5, -112.5, 0, 50.0),
-            station_proximity.NearbyFuelStation(pricier, 33.5, -111.5, 0, 120.0),
-            station_proximity.NearbyFuelStation(far, 33.5, -112.2, 0, 200.0),
+            station_proximity.NearbyFuelStation(expensive, 33.5, -117.0, 0, 200.0),
+            station_proximity.NearbyFuelStation(cheaper, 33.5, -112.0, 0, 450.0),
+            station_proximity.NearbyFuelStation(far, 33.5, -108.0, 0, 700.0),
         )
 
         selected = station_proximity.select_fuel_stops(route, nearby)
 
-        self.assertEqual(selected[0]["station"], cheaper)
-        self.assertGreater(selected[0]["distance_from_current_miles"], 0)
+        self.assertEqual(
+            [stop["station"].station_id for stop in selected],
+            ["cheap", "far"],
+        )
+        self.assertLessEqual(selected[0]["distance_from_current_miles"], 500)
+        self.assertLessEqual(selected[1]["distance_from_current_miles"], 500)
         self.assertGreater(selected[0]["fuel_cost"], 0)
+        self.assertGreater(selected[1]["fuel_cost"], 0)
 
     def test_rejects_route_with_no_safe_fuel_stop(self):
         route = {
             "type": "LineString",
-            "coordinates": [[-113.0, 33.5], [-111.0, 33.5]],
+            "coordinates": [[-120.0, 33.5], [-100.0, 33.5]],
         }
         distant_station = FuelStation("distant", "Distant", "I-10", "Yuma", "AZ", "1", 3.1)
         nearby = (
             station_proximity.NearbyFuelStation(distant_station, 33.5, -112.0, 0, 700.0),
         )
 
-        with self.assertRaisesRegex(ValueError, "No reachable fuel station"):
+        with self.assertRaisesRegex(ValueError, "No safe fuel station"):
             station_proximity.select_fuel_stops(route, nearby)
+
+    def test_no_stop_is_needed_for_route_within_full_range(self):
+        route = {
+            "type": "LineString",
+            "coordinates": [[-113.0, 33.5], [-111.0, 33.5]],
+        }
+
+        self.assertEqual(station_proximity.select_fuel_stops(route, ()), ())
 
     def test_calculates_fuel_needed_for_distance(self):
         self.assertAlmostEqual(
@@ -415,6 +498,18 @@ class GeocodingServiceTests(TestCase):
         with self.assertRaisesRegex(RuntimeError, "Unexpected response"):
             geocode("New York, NY")
 
+    @patch.dict(os.environ, {"ORS_API_KEY": "test-key"})
+    @patch("routing.services.geocoding.requests.get")
+    def test_geocode_rejects_out_of_range_coordinates(self, mock_get):
+        mock_get.return_value.json.return_value = {
+            "features": [
+                {"geometry": {"coordinates": [-200.0, 40.0]}}
+            ]
+        }
+
+        with self.assertRaisesRegex(RuntimeError, "Unexpected response"):
+            geocode("New York, NY")
+
 
 class RoutingServiceTests(TestCase):
     @patch.dict(os.environ, {"ORS_API_KEY": "test-key"})
@@ -479,8 +574,30 @@ class RoutingServiceTests(TestCase):
         with self.assertRaisesRegex(RuntimeError, "Unexpected response"):
             get_route((40.7, -74.0), (41.9, -87.6))
 
+    @patch.dict(os.environ, {"ORS_API_KEY": "test-key"})
+    @patch("routing.services.routing.requests.post")
+    def test_get_route_rejects_out_of_range_geometry(self, mock_post):
+        mock_post.return_value.json.return_value = {
+            "features": [
+                {
+                    "geometry": {
+                        "type": "LineString",
+                        "coordinates": [[-200.0, 40.7], [-87.6, 41.9]],
+                    },
+                    "properties": {"summary": {"distance": 1270000}},
+                }
+            ]
+        }
+
+        with self.assertRaisesRegex(RuntimeError, "Unexpected response"):
+            get_route((40.7, -74.0), (41.9, -87.6))
+
 
 class RouteViewGeocodingTests(TestCase):
+    @patch(
+        "routing.views.get_station_coordinate_coverage",
+        return_value={"cached_locations": 10, "total_locations": 10, "complete": True},
+    )
     @patch("routing.views.select_fuel_stops")
     @patch("routing.views.find_stations_near_route")
     @patch("routing.views.get_route")
@@ -491,6 +608,7 @@ class RouteViewGeocodingTests(TestCase):
         mock_get_route,
         mock_find_stations_near_route,
         mock_select_fuel_stops,
+        _mock_coverage,
     ):
         mock_get_route.return_value = {
             "distance_meters": 1270000,
@@ -551,11 +669,114 @@ class RouteViewGeocodingTests(TestCase):
             response.json()["route"]["geometry"]["coordinates"],
             [[-74.0, 40.7], [-87.6, 41.9]],
         )
-        self.assertEqual(response.json()["total_gallons"], 1.0)
-        self.assertEqual(response.json()["total_fuel_cost"], 3.25)
+        self.assertAlmostEqual(
+            response.json()["total_gallons"],
+            response.json()["route"]["distance_miles"] / 10,
+        )
+        self.assertAlmostEqual(
+            response.json()["total_fuel_cost"],
+            response.json()["total_gallons"] * 3.25,
+            places=2,
+        )
         self.assertEqual(response.json()["selected_stops"][0]["name"], "Test Station")
+        self.assertAlmostEqual(
+            response.json()["selected_stops"][0]["gallons_needed"],
+            response.json()["total_gallons"],
+        )
         self.assertEqual(mock_get_route.call_count, 1)
         self.assertEqual(mock_geocode.call_count, 2)
+
+    @patch("routing.views.get_route")
+    @patch("routing.views.geocode", side_effect=[(40.7, -74.0), (41.9, -87.6)])
+    @patch(
+        "routing.views.find_stations_near_route",
+        side_effect=FileNotFoundError("coordinate cache missing"),
+    )
+    def test_post_reports_missing_station_coordinate_cache(
+        self, _mock_find_stations_near_route, _mock_geocode, mock_get_route
+    ):
+        mock_get_route.return_value = {
+            "distance_meters": 1270000,
+            "distance_miles": 1270000 / 1609.344,
+            "geometry": {
+                "type": "LineString",
+                "coordinates": [[-74.0, 40.7], [-87.6, 41.9]],
+            },
+        }
+
+        response = self.client.post(
+            "/api/route/",
+            data=json.dumps({"start": "New York, NY", "finish": "Chicago, IL"}),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("geocode_fuel_stations", response.json()["error"])
+
+    @patch(
+        "routing.views.get_station_coordinate_coverage",
+        return_value={"cached_locations": 10, "total_locations": 10, "complete": True},
+    )
+    @patch("routing.views.get_route")
+    @patch("routing.views.geocode", side_effect=[(40.7, -74.0), (41.9, -87.6)])
+    @patch("routing.views.find_stations_near_route", return_value=())
+    def test_post_reports_when_no_cached_station_is_near_the_route(
+        self,
+        _mock_find_stations_near_route,
+        _mock_geocode,
+        mock_get_route,
+        _mock_coverage,
+    ):
+        mock_get_route.return_value = {
+            "distance_meters": 1270000,
+            "distance_miles": 1270000 / 1609.344,
+            "geometry": {
+                "type": "LineString",
+                "coordinates": [[-74.0, 40.7], [-87.6, 41.9]],
+            },
+        }
+
+        response = self.client.post(
+            "/api/route/",
+            data=json.dumps({"start": "New York, NY", "finish": "Chicago, IL"}),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("No cached fuel stations", response.json()["error"])
+
+    @patch(
+        "routing.views.get_station_coordinate_coverage",
+        return_value={"cached_locations": 10, "total_locations": 100, "complete": False},
+    )
+    @patch("routing.views.get_route")
+    @patch("routing.views.geocode", side_effect=[(40.7, -74.0), (41.9, -87.6)])
+    @patch("routing.views.find_stations_near_route", return_value=())
+    def test_post_reports_incomplete_cache_when_no_stations_were_found(
+        self,
+        _mock_find_stations_near_route,
+        _mock_geocode,
+        mock_get_route,
+        _mock_coverage,
+    ):
+        mock_get_route.return_value = {
+            "distance_meters": 1270000,
+            "distance_miles": 1270000 / 1609.344,
+            "geometry": {
+                "type": "LineString",
+                "coordinates": [[-74.0, 40.7], [-87.6, 41.9]],
+            },
+        }
+
+        response = self.client.post(
+            "/api/route/",
+            data=json.dumps({"start": "New York, NY", "finish": "Chicago, IL"}),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("incomplete", response.json()["error"])
+        self.assertEqual(response.json()["station_cache"]["cached_locations"], 10)
 
     @patch("routing.views.geocode", side_effect=ValueError("Location not found"))
     def test_post_returns_bad_request_when_location_is_not_found(self, _mock_geocode):
@@ -583,12 +804,21 @@ class RouteViewGeocodingTests(TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("JSON object", response.json()["error"])
 
+    @patch(
+        "routing.views.get_station_coordinate_coverage",
+        return_value={"cached_locations": 10, "total_locations": 10, "complete": True},
+    )
     @patch("routing.views.select_fuel_stops", side_effect=ValueError("No reachable fuel station"))
     @patch("routing.views.find_stations_near_route")
     @patch("routing.views.get_route")
     @patch("routing.views.geocode", side_effect=[(40.7, -74.0), (41.9, -87.6)])
     def test_post_returns_conflict_when_route_has_no_reachable_fuel_stations(
-        self, _mock_geocode, _mock_get_route, _mock_find_stations_near_route, _mock_select_fuel_stops
+        self,
+        _mock_geocode,
+        _mock_get_route,
+        _mock_find_stations_near_route,
+        _mock_select_fuel_stops,
+        _mock_coverage,
     ):
         _mock_find_stations_near_route.return_value = (
             station_proximity.NearbyFuelStation(
@@ -610,6 +840,49 @@ class RouteViewGeocodingTests(TestCase):
         self.assertEqual(response.json()["error"], "No reachable fuel station")
 
     @patch(
+        "routing.views.get_station_coordinate_coverage",
+        return_value={"cached_locations": 10, "total_locations": 100, "complete": False},
+    )
+    @patch("routing.views.select_fuel_stops", side_effect=ValueError("No safe plan"))
+    @patch("routing.views.find_stations_near_route")
+    @patch("routing.views.get_route")
+    @patch("routing.views.geocode", side_effect=[(40.7, -74.0), (41.9, -87.6)])
+    def test_post_does_not_claim_no_plan_when_cache_is_incomplete(
+        self,
+        _mock_geocode,
+        _mock_get_route,
+        _mock_find_stations_near_route,
+        _mock_select_fuel_stops,
+        _mock_coverage,
+    ):
+        _mock_get_route.return_value = {
+            "distance_meters": 1270000,
+            "distance_miles": 1270000 / 1609.344,
+            "geometry": {
+                "type": "LineString",
+                "coordinates": [[-74.0, 40.7], [-87.6, 41.9]],
+            },
+        }
+        _mock_find_stations_near_route.return_value = (
+            station_proximity.NearbyFuelStation(
+                FuelStation("1", "Test Station", "Main St", "Chicago", "IL", "1", 3.25),
+                41.9,
+                -87.6,
+                0.0,
+                10.0,
+            ),
+        )
+
+        response = self.client.post(
+            "/api/route/",
+            data=json.dumps({"start": "New York, NY", "finish": "Chicago, IL"}),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("incomplete", response.json()["error"])
+
+    @patch(
         "routing.views.geocode",
         side_effect=requests.ConnectionError("Connection failed"),
     )
@@ -626,6 +899,24 @@ class RouteViewGeocodingTests(TestCase):
         self.assertEqual(
             response.json()["error"], "The geocoding service is unavailable"
         )
+
+    @patch(
+        "routing.views.geocode",
+        side_effect=requests.HTTPError(
+            response=type("Response", (), {"status_code": 429})()
+        ),
+    )
+    def test_post_returns_service_unavailable_when_geocoding_is_rate_limited(
+        self, _mock_geocode
+    ):
+        response = self.client.post(
+            "/api/route/",
+            data=json.dumps({"start": "New York, NY", "finish": "Chicago, IL"}),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("rate limit", response.json()["error"])
 
     @patch("routing.views.get_route", side_effect=requests.Timeout)
     @patch("routing.views.geocode", side_effect=[(40.7, -74.0), (41.9, -87.6)])

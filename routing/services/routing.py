@@ -61,9 +61,13 @@ def get_route(start_coordinates, finish_coordinates):
             not isinstance(point, list)
             or len(point) < 2
             or any(
-                not isinstance(value, (int, float)) or not math.isfinite(value)
+                not isinstance(value, (int, float))
+                or isinstance(value, bool)
+                or not math.isfinite(value)
                 for value in point[:2]
             )
+            or not -180 <= point[0] <= 180
+            or not -90 <= point[1] <= 90
             for point in coordinates
         )
         or not isinstance(distance_meters, (int, float))

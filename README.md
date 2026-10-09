@@ -11,8 +11,8 @@ A Django API for planning a route between two U.S. locations, finding nearby fue
 - Geocodes and caches station coordinates to reduce repeated external calls
 - Finds stations close to the route
 - Orders stations by route position
-- Chooses fuel stops that satisfy the vehicle safety constraint
-- Calculates gallons used and total fuel spend
+- Chooses fuel stops using route safety and a cost-minimizing path
+- Estimates gallons used and fuel cost with documented assumptions
 - Returns a clean JSON payload for use in Postman, curl, or browser-based API testing
 
 ## Tech stack
@@ -39,6 +39,12 @@ A Django API for planning a route between two U.S. locations, finding nearby fue
 
    ORS_API_KEY=your_key_here
 
+Vehicle and station-search defaults are configured in `config/settings.py`:
+
+- `VEHICLE_MAX_RANGE_MILES = 500.0`
+- `VEHICLE_MILES_PER_GALLON = 10.0`
+- `FUEL_STATION_ROUTE_DISTANCE_MILES = 25.0`
+
 4. Run migrations:
 
    python manage.py migrate
@@ -60,7 +66,7 @@ Request body:
 }
 ```
 
-Example response:
+Illustrative response shape only; coordinates, stations, distance, and costs are computed from the live request and available station cache:
 
 ```json
 {
@@ -122,18 +128,21 @@ The route-planning flow is:
 4. Load the fuel station list from the CSV.
 5. Find stations near the computed route.
 6. Sort stations by distance along the route.
-7. Evaluate reachable stations using the 500-mile maximum range.
-8. Select the safest, cost-aware stop plan while ensuring the vehicle never becomes stranded.
-9. Calculate gallons needed from distance traveled.
-10. Calculate total fuel cost and return JSON.
+7. Evaluate the start, station, and destination legs against the 500-mile range.
+8. Use dynamic programming to minimize estimated fuel cost among feasible paths through available stations.
+9. Calculate gallons from route distance and configured MPG.
+10. Return the plan, station-cache coverage, and cost assumptions in JSON.
 
 ## Assumptions
 
 - Vehicle maximum range is 500 miles.
 - Vehicle economy is 10 MPG.
 - Fuel required is distance / 10.
+- The vehicle starts with a full tank capable of the configured maximum range.
+- Fuel cost estimates the cost of fuel consumed, not a receipt of actual purchases. Route legs are valued using the associated selected station's price; the initial leg is valued at the first selected stop's price because the starting tank's purchase price is unknown.
+- For trips needing no stops, total fuel cost is estimated using the cheapest cached station near the route as a price reference.
 - The app assumes all routing and geocoding requests are for locations in the USA.
-- Fuel-stop selection balances price and route safety, rather than simply choosing the globally cheapest station.
+- The planner uses the available cached stations. If an incomplete cache prevents confirming a safe plan, the API reports incomplete data instead of claiming there are no feasible stations.
 - The ORS API key is stored in `config/.env` and is never committed to source control.
 
 ## Testing
@@ -160,4 +169,16 @@ The test suite includes:
 - External API integrations are isolated in service files.
 - The CSV is cached in memory to avoid repeated reads from disk.
 - Station geocoding is handled through a cache-preprocessing strategy to reduce unnecessary ORS calls.
+- Coordinate-cache file changes are detected automatically, so a running server reloads updated coordinates.
 - No secrets are checked into the repository.
+
+## Station coordinate preprocessing
+
+The source CSV contains station addresses but no coordinates. Inspect and build the coordinate cache with:
+
+```powershell
+python manage.py geocode_fuel_stations --dry-run
+python manage.py geocode_fuel_stations --limit 10 --delay 1
+```
+
+The command deduplicates locations, resumes from successful cached entries, and writes each successful result immediately. It stops on temporary provider failures while preserving progress. Geocoding the full dataset means thousands of ORS lookups, so check your quota and use bounded batches. While the cache is incomplete, the API identifies whether results are based only on cached stations.

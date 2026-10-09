@@ -3,7 +3,7 @@ from django.http import JsonResponse
 from django.urls import include, path
 
 
-def api_root(request):
+def api_root(_request):
     return JsonResponse(
         {
             "message": "Fuel Route API is running.",

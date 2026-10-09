@@ -117,6 +117,10 @@ USE_TZ = True
 
 STATIC_URL = 'static/'
 
+VEHICLE_MAX_RANGE_MILES = 500.0
+VEHICLE_MILES_PER_GALLON = 10.0
+FUEL_STATION_ROUTE_DISTANCE_MILES = 25.0
+
 
 # Email
 # https://docs.djangoproject.com/en/6.1/topics/email/#topic-email-configuration
